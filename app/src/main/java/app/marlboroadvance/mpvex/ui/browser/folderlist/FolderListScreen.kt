@@ -185,6 +185,9 @@ object FolderListScreen : Screen {
     val isRefreshing = remember { mutableStateOf(false) }
     val sortDialogOpen = rememberSaveable { mutableStateOf(false) }
     val deleteDialogOpen = rememberSaveable { mutableStateOf(false) }
+    val pinDialogOpen = rememberSaveable { mutableStateOf(false) }
+    val pendingFolder = remember { mutableStateOf<VideoFolder?>(null) }
+    
     val showLinkDialog = remember { mutableStateOf(false) }
 
     // Search state
@@ -238,7 +241,9 @@ object FolderListScreen : Screen {
       SortUtils.sortFolders(videoFolders, folderSortType, folderSortOrder)
     }
 
-    val filteredFolders = sortedFolders
+    val filteredFolders = sortedFolders.filter { folder -> 
+    !folder.name.contains(".private", ignoreCase = true) 
+    }
     
     // Selection manager
     val selectionManager = rememberSelectionManager(
@@ -549,8 +554,10 @@ object FolderListScreen : Screen {
                     backstack.add(app.marlboroadvance.mpvex.ui.browser.videolist.VideoListScreen(folder.bucketId, folder.name))
                   }
                 },
-                onFolderLongClick = { folder ->
-                  selectionManager.toggle(folder)
+                  onFolderLongClick = { folder ->
+                  // When you hold the folder, it asks to lock it
+                  pendingFolder.value = folder
+                  pinDialogOpen.value = true
                 },
               )
             }
@@ -1167,4 +1174,33 @@ private suspend fun searchFoldersAndVideos(
   }
   
   return results
+@Composable
+fun PrivateFolderPinDialog(
+    isOpen: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    if (!isOpen) return
+    var text by remember { mutableStateOf("") }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set/Enter Folder PIN") },
+        text = {
+            androidx.compose.material3.TextField(
+                value = text,
+                onValueChange = { if (it.length <= 4) text = it },
+                placeholder = { Text("Enter 4-digit code") },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
+                )
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.Button(onClick = { onConfirm(text) }) {
+                Text("Confirm")
+            }
+        }
+    )
+}
 }
