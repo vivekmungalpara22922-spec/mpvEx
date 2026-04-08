@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ViewList
@@ -31,11 +34,14 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.filled.ViewModule
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -44,11 +50,13 @@ import androidx.compose.material3.FloatingActionButtonMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleFloatingActionButton
 import androidx.compose.material3.ToggleFloatingActionButtonDefaults.animateIcon
 import androidx.compose.material3.TooltipAnchorPosition
@@ -76,6 +84,7 @@ import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -168,17 +177,17 @@ object FolderListScreen : Screen {
     // Preferences
     val mediaLayoutMode by browserPreferences.mediaLayoutMode.collectAsState()
     val folderGridColumnsPortrait by browserPreferences.folderGridColumnsPortrait.collectAsState()
-  val folderGridColumnsLandscape by browserPreferences.folderGridColumnsLandscape.collectAsState()
-  val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-  val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-  val folderGridColumns = if (isLandscape) folderGridColumnsLandscape else folderGridColumnsPortrait
+    val folderGridColumnsLandscape by browserPreferences.folderGridColumnsLandscape.collectAsState()
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val folderGridColumns = if (isLandscape) folderGridColumnsLandscape else folderGridColumnsPortrait
     val showSubtitleIndicator by browserPreferences.showSubtitleIndicator.collectAsState()
     val folderSortType by browserPreferences.folderSortType.collectAsState()
     val folderSortOrder by browserPreferences.folderSortOrder.collectAsState()
     val tapThumbnailToSelect by gesturePreferences.tapThumbnailToSelect.collectAsState()
     val enableRecentlyPlayed by advancedPreferences.enableRecentlyPlayed.collectAsState()
 
-    // UI state - use standalone states to avoid scroll issues with predictive back gesture
+    // UI state
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
     val navigationBarHeight = LocalNavigationBarHeight.current
@@ -186,6 +195,12 @@ object FolderListScreen : Screen {
     val sortDialogOpen = rememberSaveable { mutableStateOf(false) }
     val deleteDialogOpen = rememberSaveable { mutableStateOf(false) }
     val showLinkDialog = remember { mutableStateOf(false) }
+
+    // Private folder states
+    val pinDialogOpen = rememberSaveable { mutableStateOf(false) }
+    val pendingFolder = remember { mutableStateOf<VideoFolder?>(null) }
+    // Track private folder changes to trigger recomposition
+    var privateFolderVersion by remember { mutableIntStateOf(0) }
 
     // Search state
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -238,8 +253,15 @@ object FolderListScreen : Screen {
       SortUtils.sortFolders(videoFolders, folderSortType, folderSortOrder)
     }
 
-    val filteredFolders = sortedFolders
-    
+    // >>> PRIVATE FOLDER CHANGE: hide private folders from the main list
+    val filteredFolders = remember(sortedFolders, privateFolderVersion) {
+      val privatePaths = PrivateFolderManager.getPrivateFolderPaths(context)
+      sortedFolders.filter { folder ->
+        !folder.name.contains(".private", ignoreCase = true) &&
+        folder.path !in privatePaths
+      }
+    }
+
     // Selection manager
     val selectionManager = rememberSelectionManager(
       items = sortedFolders,
@@ -270,6 +292,8 @@ object FolderListScreen : Screen {
       val observer = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_RESUME) {
           viewModel.recalculateNewVideoCounts()
+          // Refresh private folder filter when returning to screen
+          privateFolderVersion++
         }
       }
       lifecycleOwner.lifecycle.addObserver(observer)
@@ -475,13 +499,23 @@ object FolderListScreen : Screen {
             text = { Text(text = "Recently Played") },
           )
 
-          FloatingActionButtonMenuItem(
+          FloatingActionButtonMenuItem(            
             onClick = {
               isFabExpanded.value = false
               showLinkDialog.value = true
             },
             icon = { Icon(Icons.Filled.Link, contentDescription = null) },
             text = { Text(text = "Open Link") },
+          )
+
+          // >>> PRIVATE FOLDER CHANGE: new FAB menu item
+          FloatingActionButtonMenuItem(
+            onClick = {
+              isFabExpanded.value = false
+              backstack.add(PrivateFolderScreen)
+            },
+            icon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+            text = { Text(text = "Private") },
           )
         }
       },
@@ -493,7 +527,6 @@ object FolderListScreen : Screen {
               // Show search results
               Box(modifier = Modifier.fillMaxSize()) {
                 if (isSearchLoading) {
-                  // Loading state
                   Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
@@ -501,7 +534,6 @@ object FolderListScreen : Screen {
                     CircularProgressIndicator()
                   }
                 } else if (searchResults.isEmpty()) {
-                  // No results
                   EmptyState(
                     icon = Icons.Filled.Search,
                     title = "No results found",
@@ -509,7 +541,6 @@ object FolderListScreen : Screen {
                     modifier = Modifier.fillMaxSize(),
                   )
                 } else {
-                  // Show search results
                   SearchResultsContent(
                     searchResults = searchResults,
                     navigationBarHeight = navigationBarHeight,
@@ -549,8 +580,25 @@ object FolderListScreen : Screen {
                     backstack.add(app.marlboroadvance.mpvex.ui.browser.videolist.VideoListScreen(folder.bucketId, folder.name))
                   }
                 },
+                // >>> PRIVATE FOLDER CHANGE: long-press makes folder private
                 onFolderLongClick = { folder ->
-                  selectionManager.toggle(folder)
+                  if (!selectionManager.isInSelectionMode) {
+                    if (!PrivateFolderManager.isPinSet(context)) {
+                      // No PIN set yet — ask user to set one first
+                      pendingFolder.value = folder
+                      pinDialogOpen.value = true
+                    } else {
+                      PrivateFolderManager.addPrivateFolder(context, folder.path)
+                      privateFolderVersion++ // triggers recomposition to hide folder
+                      android.widget.Toast.makeText(
+                        context,
+                        "${folder.name} moved to Private",
+                        android.widget.Toast.LENGTH_SHORT,
+                      ).show()
+                    }
+                  } else {
+                    selectionManager.toggle(folder)
+                  }
                 },
               )
             }
@@ -584,11 +632,67 @@ object FolderListScreen : Screen {
       DeleteConfirmationDialog(
         isOpen = deleteDialogOpen.value,
         onDismiss = { deleteDialogOpen.value = false },
-        onConfirm = { selectionManager.deleteSelected() },
+                onConfirm = { selectionManager.deleteSelected() },
         itemType = "folder",
         itemCount = selectionManager.selectedCount,
         itemNames = selectionManager.getSelectedItems().map { it.name },
       )
+
+      // >>> PRIVATE FOLDER CHANGE: PIN setup dialog (first time making a folder private)
+      if (pinDialogOpen.value) {
+        var pinText by remember { mutableStateOf("") }
+        AlertDialog(
+          onDismissRequest = {
+            pinDialogOpen.value = false
+            pendingFolder.value = null
+          },
+          title = { Text("Set a 4-digit PIN") },
+          text = {
+            Column {
+              Text("You need a PIN to protect private folders.")
+              Spacer(Modifier.height(12.dp))
+              OutlinedTextField(
+                value = pinText,
+                onValueChange = { if (it.length <= 4 && it.all { c -> c.isDigit() }) pinText = it },
+                label = { Text("4-digit PIN") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                  keyboardType = KeyboardType.NumberPassword,
+                ),
+              )
+            }
+          },
+          confirmButton = {
+            Button(
+              onClick = {
+                if (pinText.length == 4) {
+                  PrivateFolderManager.setPin(context, pinText)
+                  pendingFolder.value?.let { folder ->
+                    PrivateFolderManager.addPrivateFolder(context, folder.path)
+                    privateFolderVersion++
+                    android.widget.Toast.makeText(
+                      context,
+                      "${folder.name} moved to Private",
+                      android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                  }
+                  pinDialogOpen.value = false
+                  pendingFolder.value = null
+                }
+              },
+              enabled = pinText.length == 4,
+            ) { Text("Set PIN & Hide Folder") }
+          },
+          dismissButton = {
+            TextButton(onClick = {
+              pinDialogOpen.value = false
+              pendingFolder.value = null
+            }) {
+              Text("Cancel")
+            }
+          },
+        )
+      }
     }
   }
 }
@@ -794,7 +898,7 @@ private fun ListContent(
 ) {
   Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
-      state = listState,
+            state = listState,
       modifier = Modifier.fillMaxSize(),
       contentPadding = PaddingValues(
         start = 8.dp,
@@ -1017,7 +1121,7 @@ private fun SearchResultsContent(
 ) {
   val folders = searchResults.filterIsInstance<FileSystemItem.Folder>().map { folder ->
     app.marlboroadvance.mpvex.domain.media.model.VideoFolder(
-      bucketId = folder.path,  // Use path as bucketId since FileSystemItem.Folder doesn't have bucketId
+      bucketId = folder.path,
       name = folder.name,
       path = folder.path,
       videoCount = folder.videoCount,
@@ -1027,9 +1131,9 @@ private fun SearchResultsContent(
     )
   }
   val videos = searchResults.filterIsInstance<FileSystemItem.VideoFile>().map { it.video }
-  
+
   val isGridMode = mediaLayoutMode == app.marlboroadvance.mpvex.preferences.MediaLayoutMode.GRID
-  
+
   Box(modifier = Modifier.fillMaxSize()) {
     if (isGridMode) {
       LazyVerticalGrid(
@@ -1057,7 +1161,7 @@ private fun SearchResultsContent(
             isGridMode = true,
           )
         }
-        
+
         items(videos.size) { index ->
           val video = videos[index]
           VideoCard(
@@ -1093,7 +1197,7 @@ private fun SearchResultsContent(
             isGridMode = false,
           )
         }
-        
+
         items(videos.size) { index ->
           val video = videos[index]
           VideoCard(
@@ -1112,24 +1216,21 @@ private fun SearchResultsContent(
 
 /**
  * Searches for folders and videos matching the query
- * Returns FileSystemItem results containing matching folders and videos
  */
 private suspend fun searchFoldersAndVideos(
   context: Context,
   query: String,
 ): List<FileSystemItem> {
   val results = mutableListOf<FileSystemItem>()
-  
+
   try {
     Log.d("FolderListScreen", "Searching for: $query")
-    
-    // Get all video folders
+
     val folders = app.marlboroadvance.mpvex.repository.MediaFileRepository
       .getAllVideoFoldersFast(context)
-    
-    // Search in folders
+
     folders.forEach { folder ->
-      if (folder.name.contains(query, ignoreCase = true) || 
+      if (folder.name.contains(query, ignoreCase = true) ||
           folder.path.contains(query, ignoreCase = true)) {
         results.add(
           FileSystemItem.Folder(
@@ -1142,11 +1243,10 @@ private suspend fun searchFoldersAndVideos(
           )
         )
       }
-      
-      // Also search within videos in this folder
+
       val videos = app.marlboroadvance.mpvex.repository.MediaFileRepository
         .getVideosInFolder(context, folder.bucketId)
-      
+
       videos.forEach { video ->
         if (video.displayName.contains(query, ignoreCase = true)) {
           results.add(
@@ -1160,11 +1260,11 @@ private suspend fun searchFoldersAndVideos(
         }
       }
     }
-    
+
     Log.d("FolderListScreen", "Found ${results.size} results for: $query")
   } catch (e: Exception) {
     Log.e("FolderListScreen", "Error searching folders and videos", e)
   }
-  
+
   return results
 }
